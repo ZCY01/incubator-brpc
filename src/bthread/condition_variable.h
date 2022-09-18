@@ -55,6 +55,7 @@ public:
 
     native_handler_type native_handler() { return &_cond; }
 
+    // Mutex 一般是 pthread mutex
     void wait(std::unique_lock<bthread::Mutex>& lock) {
         bthread_cond_wait(&_cond, lock.mutex()->native_handler());
     }
@@ -98,6 +99,28 @@ public:
     }
 
 private:
+    /*
+    typedef struct {
+        int64_t duration_ns;
+        size_t sampling_range;
+    } bthread_contention_site_t;
+
+    typedef struct {
+        unsigned* butex;
+        bthread_contention_site_t csite;
+    } bthread_mutex_t;
+
+    typedef struct {
+        bthread_mutex_t* m;
+        int* seq; // 这个 butex 类型的锁
+    } bthread_cond_t;
+
+    bthread_cond_t 和 CondInternal 转换
+    struct CondInternal {
+        butil::atomic<bthread_mutex_t*> m;
+        butil::atomic<int>* seq;
+    };
+    */
     bthread_cond_t                  _cond;
 };
 

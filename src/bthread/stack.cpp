@@ -64,6 +64,9 @@ int allocate_stack_storage(StackStorage* s, int stacksize_in, int guardsize_in) 
         (std::max(stacksize_in, MIN_STACKSIZE) + PAGESIZE_M1) &
         ~PAGESIZE_M1;
 
+    // 没有保护页，不推荐
+    // bthread 使用的堆栈一般很小
+    // 如果函数使用的栈空间过大，很有可能越界，排查问题困难
     if (guardsize_in <= 0) {
         void* mem = malloc(stacksize);
         if (NULL == mem) {
@@ -88,6 +91,9 @@ int allocate_stack_storage(StackStorage* s, int stacksize_in, int guardsize_in) 
             (std::max(guardsize_in, MIN_GUARDSIZE) + PAGESIZE_M1) &
             ~PAGESIZE_M1;
 
+        // 申请 memsize = stacksize + guardsize 大小的堆栈
+        // 其中 guardsize 是没有访问权限的
+        // 如果访问到这些没有访问权限的堆栈，产生 SIGSEGV 信号
         const int memsize = stacksize + guardsize;
         void* const mem = mmap(NULL, memsize, (PROT_READ | PROT_WRITE),
                                (MAP_PRIVATE | MAP_ANONYMOUS), -1, 0);
@@ -101,12 +107,23 @@ int allocate_stack_storage(StackStorage* s, int stacksize_in, int guardsize_in) 
             return -1;
         }
 
+        // 要对部分内存设置不可访问权限
+        // mem 实际上是栈顶，栈底是 mem + memsize (考虑到栈是往低地址增加的)
+        // 因此需要保护的栈部分是靠近栈顶这部分的内存
+        // int mprotect(void *addr, size_t len, int prot);
+        // addr 必须是 pagesize 对齐
+        // 首先找到需要保护的内存地址开始地址，即 aligned_mem
+        // 需要保护的内存片段为：[aligned_mem, aligned_mem + guardsize - offset)
+        // 长度为 guardsize - offset
         void* aligned_mem = (void*)(((intptr_t)mem + PAGESIZE_M1) & ~PAGESIZE_M1);
         if (aligned_mem != mem) {
             LOG_ONCE(ERROR) << "addr=" << mem << " returned by mmap is not "
                 "aligned by pagesize=" << PAGESIZE;
         }
         const int offset = (char*)aligned_mem - (char*)mem;
+        // 这个长度计算有点奇怪
+        // 首先 offset 这一部分肯定是浪费的
+        // 浪费部分不能超过 guardsize？
         if (guardsize <= offset ||
             mprotect(aligned_mem, guardsize - offset, PROT_NONE) != 0) {
             munmap(mem, memsize);

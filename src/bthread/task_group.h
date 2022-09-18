@@ -1,3 +1,38 @@
+/*
+TaskGroup 是 Task 的实际执行者。
+TaskControl 创建 pthread，并在 pthread 中执行 run_main_task
+
+1. 任务创建
+   调用 start_foreground 和 start_background 会创建一个描述 Task 的 TaskMeta，此时不会分配堆栈，直到 Task 要运行时才会申请 Stack
+   start_foreground 和 start_background 的区别在于 foreground 创建并切换到新 Task
+
+2. 任务类型
+   根据 Task 能否申请到 Stack 可划分为 pthread task 和 bthread task
+   bthread task 拥有自己的堆栈且可以随意偷到其他 worker
+   pthread task 没有自己的堆栈，借用 main_stack，必须是 pthread 行为
+
+   原因在于 pthread task 和 main_tid 是绑定的，pthread task 如果被偷了，相当于 main_tid 在其他 worker 上执行
+   相当于本 worker 的管理者没了，不可思议。
+
+   因此 pthread task 调用任何的函数都会导致 worker 休眠，而不是开始执行其他任务
+
+3. sched_to 和 task_runner
+   sched_to 调用 jump_stack 切换堆栈，跳转的实际入口是 task_runner
+   也就是说一个新的 Task 任务的实际入口是 task_runner
+   task_runner 会执行做一些初始化动作，执行 fn(args)，最后执行一些清理动作。
+   task_runner 函数还没有退出就就切换到下一个 tid 了
+
+4. 关于 set_remained
+   有些动作，比如清理当前任务的堆栈和 TaskMeta，不能在当前堆栈上执行
+   需要当前任务执行完毕的时候才能清理
+   所以会将一些动作留到下一个 bthread 开始执行之前
+
+5. tid 只会存放于一个地方，比如 rq 或者 remote_rq 或者某个 butex.waiters
+   不然就乱套了，比如如果 tid 同时存在 butex.waiters 和 rq
+   butex 会唤醒该 tid 运行，该 tid 也会从 rq 拉出来运行
+   乱套了
+*/
+
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information

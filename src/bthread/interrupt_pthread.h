@@ -26,6 +26,9 @@
 
 namespace bthread {
 
+// TaskControl stop_and_join 的时候会调用这个函数
+// 用于唤醒所有的 worker
+// 比如有些 worker 陷入 sys_call，使用 kill 可将他们唤醒
 // Make blocking ops in the pthread returns -1 and EINTR.
 // Returns what pthread_kill returns.
 int interrupt_pthread(pthread_t th);

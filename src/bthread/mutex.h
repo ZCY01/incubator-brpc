@@ -39,6 +39,7 @@ __END_DECLS
 
 namespace bthread {
 
+// 将 butex 封装成 Mutex，用法更习惯
 // The C++ Wrapper of bthread_mutex
 
 // NOTE: Not aligned to cacheline as the container of Mutex is practically aligned
@@ -69,6 +70,7 @@ private:
 
 namespace internal {
 #ifdef BTHREAD_USE_FAST_PTHREAD_MUTEX
+// 可以从这学习 mutex 的实现方式
 class FastPthreadMutex {
 public:
     FastPthreadMutex() : _futex(0) {}
@@ -79,6 +81,23 @@ public:
 private:
     DISALLOW_COPY_AND_ASSIGN(FastPthreadMutex);
     int lock_contended();
+    /*
+        sizeof(unsigned) == 4
+        实际上会被解读成下面这个数据结构
+        struct MutexInternal {
+        butil::static_atomic<unsigned char> locked;
+        butil::static_atomic<unsigned char> contended;
+        unsigned short padding;
+        };
+        _futex 一共有三种可能状态
+        1. {{0}, {0}, {0}} 解锁状态
+        2. {{1}, {0}, {0}} 加锁状态
+        3. {{1}, {1}, {0}} 竞争状态
+
+        场景1：无竞争，加锁解锁状态：{{0}, {0}, {0}} -> {{1}, {0}, {0}} -> {{0}, {0}, {0}}
+        场景2：有竞争，加锁加锁解锁解：
+        {{0}, {0}, {0}} -> {{1}, {0}, {0}} -> {{1}, {1}, {0}} -> {{0}, {0}, {0}} -> {{1}, {1}, {0}} -> {{0}, {0}, {0}}
+    */
     unsigned _futex;
 };
 #else

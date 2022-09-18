@@ -611,6 +611,7 @@ BUTIL_FORCE_INLINE int pthread_mutex_unlock_impl(pthread_mutex_t* mutex) {
     return rc;
 }
 
+// bthread_mutex_t FastPthreadMutex 都共有这个 MutexInternal 结构
 // Implement bthread_mutex_t related functions
 struct MutexInternal {
     butil::static_atomic<unsigned char> locked;
@@ -659,6 +660,11 @@ inline int mutex_timedlock_contended(
 namespace internal {
 
 int FastPthreadMutex::lock_contended() {
+    // 原来 普通变量可以和 atomic 进行转换！
+    // 对整个 _futex 进行加锁
+    // 返回 whole 的状态，并设置 whole 的状态为 BTHREAD_MUTEX_CONTENDED
+    // 如果 whole 没有加锁，那么就是竞争成功
+    // 否则进入睡眠
     butil::atomic<unsigned>* whole = (butil::atomic<unsigned>*)&_futex;
     while (whole->exchange(BTHREAD_MUTEX_CONTENDED) & BTHREAD_MUTEX_LOCKED) {
         if (futex_wait_private(whole, BTHREAD_MUTEX_CONTENDED, NULL) < 0
@@ -671,9 +677,12 @@ int FastPthreadMutex::lock_contended() {
 
 void FastPthreadMutex::lock() {
     bthread::MutexInternal* split = (bthread::MutexInternal*)&_futex;
+    // 返回 locked 的状态，并对 locked 进行加锁
     if (split->locked.exchange(1, butil::memory_order_acquire)) {
+        // 如果返回的是 1， 说明加锁了，这个时候要进入竞争状态
         (void)lock_contended();
     }
+    // 加锁成功
 }
 
 bool FastPthreadMutex::try_lock() {
@@ -683,11 +692,23 @@ bool FastPthreadMutex::try_lock() {
 
 void FastPthreadMutex::unlock() {
     butil::atomic<unsigned>* whole = (butil::atomic<unsigned>*)&_futex;
+    // 将 whole 设置为解锁状态
     const unsigned prev = whole->exchange(0, butil::memory_order_release);
     // CAUTION: the mutex may be destroyed, check comments before butex_create
+    // 如果发现锁的状态是竞争，说明 pthread 阻塞在锁上，此时调用 futex_wake_private 唤醒 pthread
     if (prev != BTHREAD_MUTEX_LOCKED) {
         futex_wake_private(whole, 1);
     }
+    // 考虑加锁加锁解锁解锁的场景
+    // 初始状态：{{0}, {0}, {0}}
+    // 1. pthread1 lock()：{{0}, {0}, {0}} -> {{1}, {0}, {0}}
+    // 2. pthread2 lock()：lock_contended()：{{1}, {0}, {0}} -> {{1}, {1}, {0}}
+    //    pthread2 调用 futex_wait_private 休眠
+    // 3. pthread1 unlock()：{{1}, {1}, {0}} -> {{0}, {0}, {0}}
+    //    pthread1 调用 futex_wake_private 唤醒 pthread2
+    // 4. pthread2 被唤醒重新执行 lock_contended 的 while 循环： {{0}, {0}, {0}} -> {{1}, {1}, {0}} 并获得锁
+    // 5. pthread2 unlock()：{{1}, {1}, {0}} -> {{0}, {0}, {0}}
+    //    此时显然没有其他的 pthread 在等在锁，但是 pthread2 还得执行一次 futex_wake_private
 }
 
 } // namespace internal
@@ -700,20 +721,25 @@ extern "C" {
 int bthread_mutex_init(bthread_mutex_t* __restrict m,
                        const bthread_mutexattr_t* __restrict) {
     bthread::make_contention_site_invalid(&m->csite);
+    // 创建 butex
     m->butex = bthread::butex_create_checked<unsigned>();
     if (!m->butex) {
         return ENOMEM;
     }
+    // 初始化 butex 的值
     *m->butex = 0;
     return 0;
 }
 
 int bthread_mutex_destroy(bthread_mutex_t* m) {
+    // 删除 butex
     bthread::butex_destroy(m->butex);
     return 0;
 }
 
 int bthread_mutex_trylock(bthread_mutex_t* m) {
+    // butex 竟然还能这么用
+    // 行为状态和 FastPthreadMutex 一样啊
     bthread::MutexInternal* split = (bthread::MutexInternal*)m->butex;
     if (!split->locked.exchange(1, butil::memory_order_acquire)) {
         return 0;
@@ -727,9 +753,11 @@ int bthread_mutex_lock_contended(bthread_mutex_t* m) {
 
 int bthread_mutex_lock(bthread_mutex_t* m) {
     bthread::MutexInternal* split = (bthread::MutexInternal*)m->butex;
+    // 如果没有加锁
     if (!split->locked.exchange(1, butil::memory_order_acquire)) {
         return 0;
     }
+    // 需要进入竞争状态
     // Don't sample when contention profiler is off.
     if (!bthread::g_cp) {
         return bthread::mutex_lock_contended(m);

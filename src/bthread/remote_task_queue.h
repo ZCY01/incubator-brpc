@@ -29,6 +29,8 @@ namespace bthread {
 
 class TaskGroup;
 
+// 用于存放 non-worker 创建的 bthread
+// 由于多生产者多消费者，所以使用加锁的方式保护
 // A queue for storing bthreads created by non-workers. Since non-workers
 // randomly choose a TaskGroup to push which distributes the contentions,
 // this queue is simply implemented as a queue protected with a lock.

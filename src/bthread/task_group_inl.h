@@ -61,11 +61,19 @@ inline void TaskGroup::exchange(TaskGroup** pg, bthread_t next_tid) {
 
 inline void TaskGroup::sched_to(TaskGroup** pg, bthread_t next_tid) {
     TaskMeta* next_meta = address_meta(next_tid);
+    // 如果是从未执行过的任务，stack = NULL
     if (next_meta->stack == NULL) {
+        // 申请一个堆栈，新任务实际入口是 task_runner，task_runner 会做一些初始化以及收尾工作
         ContextualStack* stk = get_stack(next_meta->stack_type(), task_runner);
+        // 如果申请到内存
         if (stk) {
             next_meta->set_stack(stk);
         } else {
+            // 如果申请不到内存，很糟糕
+            // 这个时候只能让该任务在 main_stack 上运行
+            // 行为可以视为在 pthread 上运行
+            // 比如该 task 锁在 butex，如果是以 bthread 的方式运行的话，main_stack 就可以切换到其他 worker 了
+            // 事实上该 task 以 pthread 的方式运行，不会切换出去
             // stack_type is BTHREAD_STACKTYPE_PTHREAD or out of memory,
             // In latter case, attr is forced to be BTHREAD_STACKTYPE_PTHREAD.
             // This basically means that if we can't allocate stack, run

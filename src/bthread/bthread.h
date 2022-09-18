@@ -36,6 +36,7 @@
 
 __BEGIN_DECLS
 
+// 创建并切换执行
 // Create bthread `fn(args)' with attributes `attr' and put the identifier into
 // `tid'. Switch to the new thread and schedule old thread to run. Use this
 // function when the new thread is more urgent.
@@ -45,6 +46,7 @@ extern int bthread_start_urgent(bthread_t* __restrict tid,
                                 void * (*fn)(void*),
                                 void* __restrict args);
 
+// 创建并等待执行
 // Create bthread `fn(args)' with attributes `attr' and put the identifier into
 // `tid'. This function behaves closer to pthread_create: after scheduling the
 // new thread to run, it returns. In another word, the new thread may take

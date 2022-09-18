@@ -125,11 +125,13 @@ start_from_non_worker(bthread_t* __restrict tid,
                       const bthread_attr_t* __restrict attr,
                       void * (*fn)(void*),
                       void* __restrict arg) {
+    // task control 肯定是 non-worker 调用的
     TaskControl* c = get_or_new_task_control();
     if (NULL == c) {
         return ENOMEM;
     }
     if (attr != NULL && (attr->flags & BTHREAD_NOSIGNAL)) {
+        // BTHREAD_NOSIGNAL 一般用于批量生产 bthread，最好放到同一个 task_group
         // Remember the TaskGroup to insert NOSIGNAL tasks for 2 reasons:
         // 1. NOSIGNAL is often for creating many bthreads in batch,
         //    inserting into the same TaskGroup maximizes the batch.
@@ -194,10 +196,14 @@ int bthread_start_background(bthread_t* __restrict tid,
 }
 
 void bthread_flush() {
+    // 这个接口 worker 和 non-worker 都会调用
+    // worker 只处理 tls_task_group 即可
     bthread::TaskGroup* g = bthread::tls_task_group;
     if (g) {
         return g->flush_nosignal_tasks();
     }
+    // non-worker 处理 tls_task_group_nosignal
+    // tls_task_group_nosignal 是线程级的
     g = bthread::tls_task_group_nosignal;
     if (g) {
         // NOSIGNAL tasks were created in this non-worker.
@@ -221,6 +227,7 @@ int bthread_stopped(bthread_t tid) {
 
 bthread_t bthread_self(void) {
     bthread::TaskGroup* g = bthread::tls_task_group;
+    // main_tid 和 pthread task 不返回 tid
     // note: return 0 for main tasks now, which include main thread and
     // all work threads. So that we can identify main tasks from logs
     // more easily. This is probably questionable in future.
@@ -234,6 +241,7 @@ int bthread_equal(bthread_t t1, bthread_t t2) {
     return t1 == t2;
 }
 
+// 这个函数是要退出？
 void bthread_exit(void* retval) {
     bthread::TaskGroup* g = bthread::tls_task_group;
     if (g != NULL && !g->is_current_main_task()) {
@@ -313,6 +321,8 @@ int bthread_setconcurrency(int num) {
     return (num == bthread::FLAGS_bthread_concurrency ? 0 : EPERM);
 }
 
+// about_to_quit 有啥用
+// 立马执行？
 int bthread_about_to_quit() {
     bthread::TaskGroup* g = bthread::tls_task_group;
     if (g != NULL) {
@@ -325,6 +335,7 @@ int bthread_about_to_quit() {
     return EPERM;
 }
 
+// bthread 的定时器
 int bthread_timer_add(bthread_timer_t* id, timespec abstime,
                       void (*on_timer)(void*), void* arg) {
     bthread::TaskControl* c = bthread::get_or_new_task_control();
@@ -368,10 +379,14 @@ int bthread_usleep(uint64_t microseconds) {
 
 int bthread_yield(void) {
     bthread::TaskGroup* g = bthread::tls_task_group;
+    // bthread 给 yield 封装了，没问题了
+    // main_tid 也不能 yield
     if (NULL != g && !g->is_current_pthread_task()) {
         bthread::TaskGroup::yield(&g);
         return 0;
     }
+    // 如果是 main_tid 就调用操作系统的 yield
+    // 而不是继续执行
     // pthread_yield is not available on MAC
     return sched_yield();
 }

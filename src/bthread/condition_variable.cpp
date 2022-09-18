@@ -47,6 +47,7 @@ extern int bthread_mutex_lock_contended(bthread_mutex_t*);
 int bthread_cond_init(bthread_cond_t* __restrict c,
                       const bthread_condattr_t*) {
     c->m = NULL;
+    // 条件变量实际上就是用一个锁代替另外一个锁
     c->seq = bthread::butex_create_checked<int>();
     *c->seq = 0;
     return 0;
@@ -79,6 +80,7 @@ int bthread_cond_broadcast(bthread_cond_t* c) {
     void* const saved_butex = m->butex;
     // Wakeup one thread and requeue the rest on the mutex.
     ic->seq->fetch_add(1, butil::memory_order_release);
+    // 将 saved_seq 上等待的任务迁移到 save_butex
     bthread::butex_requeue(saved_seq, saved_butex);
     return 0;
 }
@@ -87,6 +89,7 @@ int bthread_cond_wait(bthread_cond_t* __restrict c,
                       bthread_mutex_t* __restrict m) {
     bthread::CondInternal* ic = reinterpret_cast<bthread::CondInternal*>(c);
     const int expected_seq = ic->seq->load(butil::memory_order_relaxed);
+    // 保存 ic->m = c
     if (ic->m.load(butil::memory_order_relaxed) != m) {
         // bind m to c
         bthread_mutex_t* expected_m = NULL;
@@ -95,6 +98,10 @@ int bthread_cond_wait(bthread_cond_t* __restrict c,
             return EINVAL;
         }
     }
+    // 对 m 解锁并对 seq 加锁
+    // 对 m 解锁就直接切换到 m 这个 bthread 上了吗
+    // 当前 bthread 就会陷入休眠啥的
+    // 但是 因此下面的 butex_wait 可能不会生效
     bthread_mutex_unlock(m);
     int rc1 = 0;
     if (bthread::butex_wait(ic->seq, expected_seq, NULL) < 0 &&

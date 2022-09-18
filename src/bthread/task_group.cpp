@@ -121,6 +121,7 @@ bool TaskGroup::wait_task(bthread_t* tid) {
         if (_last_pl_state.stopped()) {
             return false;
         }
+        // 挂载在 Parklot 上，等待唤醒
         _pl->wait(_last_pl_state);
         if (steal_task(tid)) {
             return true;
@@ -149,11 +150,16 @@ void TaskGroup::run_main_task() {
 
     TaskGroup* dummy = this;
     bthread_t tid;
+    // 一开始或者没有任务执行的时候，就会开启新的一轮循环
     while (wait_task(&tid)) {
+        // 获得一个新任务，切换
         TaskGroup::sched_to(&dummy, tid);
         DCHECK_EQ(this, dummy);
         DCHECK_EQ(_cur_meta->stack, _main_stack);
+        // 这里是 main_tid 的堆栈
+        // 如果 _cur_meta_tid != main_tid，也就是该 task 运行在 pthread task，需要手动触发 task_runner
         if (_cur_meta->tid != _main_tid) {
+            // remained 已经在 sched_to 执行了，因此可以跳过
             TaskGroup::task_runner(1/*skip remained*/);
         }
         if (FLAGS_show_per_worker_usage_in_vars && !usage_bvar) {
@@ -195,6 +201,7 @@ TaskGroup::TaskGroup(TaskControl* c)
 {
     _steal_seed = butil::fast_rand();
     _steal_offset = OFFSET_TABLE[_steal_seed % ARRAY_SIZE(OFFSET_TABLE)];
+    // 选择一个 ParkingLot
     _pl = &c->_pl[butil::fmix64(pthread_numeric_id()) % TaskControl::PARKING_LOT_NUM];
     CHECK(c);
 }
@@ -292,6 +299,7 @@ void TaskGroup::task_runner(intptr_t skip_remained) {
         // libraries.
         void* thread_return;
         try {
+            // 真正的用户函数
             thread_return = m->fn(m->arg);
         } catch (ExitException& e) {
             thread_return = e.value();
@@ -311,6 +319,7 @@ void TaskGroup::task_runner(intptr_t skip_remained) {
                       << m->stat.cputime_ns / 1000000.0 << "ms";
         }
 
+        // 返回 bthread 级变量
         // Clean tls variables, must be done before changing version_butex
         // otherwise another thread just joined this thread may not see side
         // effects of destructing tls variables.
@@ -332,19 +341,27 @@ void TaskGroup::task_runner(intptr_t skip_remained) {
                 ++*m->version_butex;
             }
         }
+        // 唤醒 join 在 version_butex 的 joiner
         butex_wake_except(m->version_butex, 0);
 
         g->_control->_nbthreads << -1;
+        // 当前堆栈的清理动作
+        // 不能直接清理，毕竟函数还在当前堆栈上运行
+        // 在下一个 bthread 的堆栈上进行清理动作
         g->set_remained(TaskGroup::_release_last_context, m);
+        // 尝试调度到其他 task
+        // bthread 任务结束
         ending_sched(&g);
 
     } while (g->_cur_meta->tid != g->_main_tid);
-
+    // bthread mode 不会运行到这里
+    // pthread task 才会运行到这里
     // Was called from a pthread and we don't have BTHREAD_STACKTYPE_PTHREAD
     // tasks to run, quit for more tasks.
 }
 
 void TaskGroup::_release_last_context(void* arg) {
+    // 清理堆栈
     TaskMeta* m = static_cast<TaskMeta*>(arg);
     if (m->stack_type() != STACK_TYPE_PTHREAD) {
         return_stack(m->release_stack()/*may be NULL*/);
@@ -352,6 +369,7 @@ void TaskGroup::_release_last_context(void* arg) {
         // it's _main_stack, don't return.
         m->set_stack(NULL);
     }
+    // 清理 TaskMeta
     return_resource(get_slot(m->tid));
 }
 
@@ -390,13 +408,15 @@ int TaskGroup::start_foreground(TaskGroup** pg,
     TaskGroup* g = *pg;
     g->_control->_nbthreads << 1;
     if (g->is_current_pthread_task()) {
+        // 如果当前是 pthread task，不然可能被偷到其他 worker
+        // 导致当前的 pthread task 占用的 main_stack 混乱
         // never create foreground task in pthread.
         g->ready_to_run(m->tid, (using_attr.flags & BTHREAD_NOSIGNAL));
     } else {
         // NOSIGNAL affects current task, not the new task.
         RemainedFn fn = NULL;
         if (g->current_task()->about_to_quit) {
-            fn = ready_to_run_in_worker_ignoresignal;
+            fn = ready_to_run_in_worker_ignoresignal; // TODO by me
         } else {
             fn = ready_to_run_in_worker;
         }
@@ -405,6 +425,7 @@ int TaskGroup::start_foreground(TaskGroup** pg,
             (bool)(using_attr.flags & BTHREAD_NOSIGNAL)
         };
         g->set_remained(fn, &args);
+        // 立即切换
         TaskGroup::sched_to(pg, m->tid);
     }
     return 0;
@@ -472,10 +493,12 @@ int TaskGroup::join(bthread_t tid, void** return_value) {
         return EINVAL;
     }
     TaskGroup* g = tls_task_group;
+    // 不能自己 join 自己，否则卡死
     if (g != NULL && g->current_tid() == tid) {
         // joining self causes indefinite waiting.
         return EINVAL;
     }
+    // bthread 结束的时候，会修改 version 并 butex_wake
     const uint32_t expected_version = get_version(tid);
     while (*m->version_butex == expected_version) {
         if (butex_wait(m->version_butex, expected_version, NULL) < 0 &&
@@ -518,6 +541,7 @@ void TaskGroup::ending_sched(TaskGroup** pg) {
 #endif
     if (!popped && !g->steal_task(&next_tid)) {
         // Jump to main task if there's no task to run.
+        // 如果没有其他可执行的任务，切换到 main_tid
         next_tid = g->_main_tid;
     }
 
@@ -525,6 +549,8 @@ void TaskGroup::ending_sched(TaskGroup** pg) {
     TaskMeta* next_meta = address_meta(next_tid);
     if (next_meta->stack == NULL) {
         if (next_meta->stack_type() == cur_meta->stack_type()) {
+            // 可以复用 cur_meta 的堆栈
+            // rsp 复位了吗? 
             // also works with pthread_task scheduling to pthread_task, the
             // transfered stack is just _main_stack.
             next_meta->set_stack(cur_meta->release_stack());
@@ -556,6 +582,7 @@ void TaskGroup::sched(TaskGroup** pg) {
 #endif
     if (!popped && !g->steal_task(&next_tid)) {
         // Jump to main task if there's no task to run.
+        // 如果没有其他任务，则切换到 main_tid
         next_tid = g->_main_tid;
     }
     sched_to(pg, next_tid);
@@ -583,6 +610,7 @@ void TaskGroup::sched_to(TaskGroup** pg, TaskMeta* next_meta) {
     }
     ++cur_meta->stat.nswitch;
     ++ g->_nswitch;
+    // 两个任务不一致时才切换
     // Switch to the task
     if (__builtin_expect(next_meta != cur_meta, 1)) {
         g->_cur_meta = next_meta;
@@ -600,12 +628,16 @@ void TaskGroup::sched_to(TaskGroup** pg, TaskMeta* next_meta) {
 
         if (cur_meta->stack != NULL) {
             if (next_meta->stack != cur_meta->stack) {
+                // 调用 jump_stack 后，切换道 next_meta 堆栈，并开始执行 task_runner
                 jump_stack(cur_meta->stack, next_meta->stack);
+                // cur_meta->stack 恢复后的执行点
+                // 如果注意 cur_meta 可能被偷到其他的 worker 上运行了，因此需要更新 g
                 // probably went to another group, need to assign g again.
                 g = tls_task_group;
             }
 #ifndef NDEBUG
             else {
+                // 只有 pthread task 运行会进入到这里
                 // else pthread_task is switching to another pthread_task, sc
                 // can only equal when they're both _main_stack
                 CHECK(cur_meta->stack == g->_main_stack);
@@ -617,6 +649,7 @@ void TaskGroup::sched_to(TaskGroup** pg, TaskMeta* next_meta) {
         LOG(FATAL) << "bthread=" << g->current_tid() << " sched_to itself!";
     }
 
+    // 执行一些清理动作，一般是 main_tid
     while (g->_last_context_remained) {
         RemainedFn fn = g->_last_context_remained;
         g->_last_context_remained = NULL;
@@ -643,9 +676,11 @@ void TaskGroup::destroy_self() {
     }
 }
 
+// signal 的作用是唤醒 ParkingLot 的 1 + additional_signal 个Worker
 void TaskGroup::ready_to_run(bthread_t tid, bool nosignal) {
     push_rq(tid);
     if (nosignal) {
+        // 记录没有触发 signal 的任务个数，和 flush_nosignal_tasks 搭配
         ++_num_nosignal;
     } else {
         const int additional_signal = _num_nosignal;
@@ -756,11 +791,13 @@ void TaskGroup::_add_sleep_event(void* void_args) {
     const uint32_t given_ver = get_version(e.tid);
     {
         BAIDU_SCOPED_LOCK(e.meta->version_lock);
+        // 还没有执行且没被中断
         if (given_ver == *e.meta->version_butex && !e.meta->interrupted) {
             e.meta->current_sleep = sleep_id;
             return;
         }
     }
+    // 被中断是啥意思? TODO by me
     // The thread is stopped or interrupted.
     // interrupt() always sees that current_sleep == 0. It will not schedule
     // the calling thread. The race is between current thread and timer thread.
@@ -815,6 +852,7 @@ static int interrupt_and_consume_waiters(
     }
     const uint32_t given_ver = get_version(tid);
     BAIDU_SCOPED_LOCK(m->version_lock);
+    // task 还没有执行完毕
     if (given_ver == *m->version_butex) {
         *pw = m->current_waiter.exchange(NULL, butil::memory_order_acquire);
         *sleep_id = m->current_sleep;
@@ -830,6 +868,7 @@ static int set_butex_waiter(bthread_t tid, ButexWaiter* w) {
     if (m != NULL) {
         const uint32_t given_ver = get_version(tid);
         BAIDU_SCOPED_LOCK(m->version_lock);
+        // task 还没有执行完毕
         if (given_ver == *m->version_butex) {
             // Release fence makes m->interrupted visible to butex_wait
             m->current_waiter.store(w, butil::memory_order_release);
@@ -839,6 +878,7 @@ static int set_butex_waiter(bthread_t tid, ButexWaiter* w) {
     return EINVAL;
 }
 
+// 中断 bthread 的等待，直接 wake up
 // The interruption is "persistent" compared to the ones caused by signals,
 // namely if a bthread is interrupted when it's not blocked, the interruption
 // is still remembered and will be checked at next blocking. This designing
@@ -850,14 +890,24 @@ int TaskGroup::interrupt(bthread_t tid, TaskControl* c) {
     // Consume current_waiter in the TaskMeta, wake it up then set it back.
     ButexWaiter* w = NULL;
     uint64_t sleep_id = 0;
+    // 取出 bthread 的 current_waiter 和 sleep_id
     int rc = interrupt_and_consume_waiters(tid, &w, &sleep_id);
     if (rc) {
         return rc;
     }
     // a bthread cannot wait on a butex and be sleepy at the same time.
     CHECK(!sleep_id || !w);
+    // bthread 不会同时执行 usleep 和 butex_wait
+    // 因此如果 w 存在，说明 bthread 在调用 butex_wait
+    // 否则就是 usleep
     if (w != NULL) {
         erase_from_butex_because_of_interruption(w);
+        // butex_wait 的时候会设置 current_waiter
+        // 如果 butex_wait 醒来发现 current_wait == NULL，说明 interrupt 正在执行
+        // 此时 butex_wait 应该休眠，直到 interrupt 将 current_wait 恢复回去
+        // 但是好像没有删除定时器？
+        // erase_from_butex_because_of_interruption 调用 ready_to_run_general 将 tid 放入 rq
+        // BUG. sleep 还在，虽然没啥影响
         // If butex_wait() already wakes up before we set current_waiter back,
         // the function will spin until current_waiter becomes non-NULL.
         rc = set_butex_waiter(tid, w);
@@ -881,6 +931,7 @@ int TaskGroup::interrupt(bthread_t tid, TaskControl* c) {
     return 0;
 }
 
+// bug? 如果是 pthread task 的话，岂不是将 main_tid 插入 rq，main_tid 就会被偷到其他 worker
 void TaskGroup::yield(TaskGroup** pg) {
     TaskGroup* g = *pg;
     ReadyToRunArgs args = { g->current_tid(), false };

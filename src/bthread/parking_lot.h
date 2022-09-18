@@ -30,6 +30,7 @@ namespace bthread {
 // Park idle workers.
 class BAIDU_CACHELINE_ALIGNMENT ParkingLot {
 public:
+    // ParkingLot 的状态
     class State {
     public:
         State(): val(0) {}
@@ -42,9 +43,12 @@ public:
 
     ParkingLot() : _pending_signal(0) {}
 
+    // 唤醒 num_task 个 worker
     // Wake up at most `num_task' workers.
     // Returns #workers woken up.
     int signal(int num_task) {
+        // _pending_signal 末位用于标识是否 stop
+        // 不关心 _pending_signal 的值
         _pending_signal.fetch_add((num_task << 1), butil::memory_order_release);
         return futex_wake_private(&_pending_signal, num_task);
     }
@@ -54,6 +58,7 @@ public:
         return _pending_signal.load(butil::memory_order_acquire);
     }
 
+    // 等待新任务到来
     // Wait for tasks.
     // If the `expected_state' does not match, wait() may finish directly.
     void wait(const State& expected_state) {

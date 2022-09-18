@@ -48,6 +48,7 @@ extern pthread_mutex_t g_task_control_mutex;
 extern BAIDU_THREAD_LOCAL TaskGroup* tls_task_group;
 void (*g_worker_startfn)() = NULL;
 
+// 用户自定义，开启 bthread 的回调函数
 // May be called in other modules to run startfn in non-worker pthreads.
 void run_worker_startfn() {
     if (g_worker_startfn) {
@@ -55,6 +56,7 @@ void run_worker_startfn() {
     }
 }
 
+// worker 线程的入口
 void* TaskControl::worker_thread(void* arg) {
     run_worker_startfn();    
 #ifdef BAIDU_INTERNAL
@@ -62,6 +64,7 @@ void* TaskControl::worker_thread(void* arg) {
 #endif
     
     TaskControl* c = static_cast<TaskControl*>(arg);
+    // 通过 TaskControl 创建 TaskGroup，create_group 会进行一些初始化动作
     TaskGroup* g = c->create_group();
     TaskStatistics stat;
     if (NULL == g) {
@@ -73,6 +76,7 @@ void* TaskControl::worker_thread(void* arg) {
 
     tls_task_group = g;
     c->_nworkers << 1;
+    // worker 的主要循环函数
     g->run_main_task();
 
     stat = g->main_stat();
@@ -85,6 +89,7 @@ void* TaskControl::worker_thread(void* arg) {
     return NULL;
 }
 
+// 创建 TaskGroup
 TaskGroup* TaskControl::create_group() {
     TaskGroup* g = new (std::nothrow) TaskGroup(this);
     if (NULL == g) {
@@ -162,6 +167,7 @@ int TaskControl::init(int concurrency) {
     
     _workers.resize(_concurrency);   
     for (int i = 0; i < _concurrency; ++i) {
+        // 在这里创建 worker
         const int rc = pthread_create(&_workers[i], NULL, worker_thread, this);
         if (rc) {
             LOG(ERROR) << "Fail to create _workers[" << i << "], " << berror(rc);
@@ -187,6 +193,7 @@ int TaskControl::add_workers(int num) {
         return 0;
     }
     try {
+        // _workers 存放的是 pid，可以直接 resize
         _workers.resize(_concurrency + num);
     } catch (...) {
         return 0;
@@ -260,6 +267,7 @@ TaskControl::~TaskControl() {
     _groups = NULL;
 }
 
+// group 创建后，调用 _add_group 将自己添加到 TaskControl 的 _group 中进行管理
 int TaskControl::_add_group(TaskGroup* g) {
     if (__builtin_expect(NULL == g, 0)) {
         return -1;
@@ -346,6 +354,7 @@ bool TaskControl::steal_task(bthread_t* tid, size_t* seed, size_t offset) {
     for (size_t i = 0; i < ngroup; ++i, s += offset) {
         TaskGroup* g = _groups[s % ngroup];
         // g is possibly NULL because of concurrent _destroy_group
+        // 先从 _rq 中偷，偷不到再从 _remote_rq 中偷
         if (g) {
             if (g->_rq.steal(tid)) {
                 stolen = true;
@@ -365,6 +374,7 @@ void TaskControl::signal_task(int num_task) {
     if (num_task <= 0) {
         return;
     }
+    // 唤醒 num_task 个 worker 进行动作，这里最多唤醒两个 worker
     // TODO(gejun): Current algorithm does not guarantee enough threads will
     // be created to match caller's requests. But in another side, there's also
     // many useless signalings according to current impl. Capping the concurrency
@@ -382,6 +392,7 @@ void TaskControl::signal_task(int num_task) {
             num_task -= _pl[start_index].signal(1);
         }
     }
+    // worker 数不够的话，再创建新的 worker 直到上限
     if (num_task > 0 &&
         FLAGS_bthread_min_concurrency > 0 &&    // test min_concurrency for performance
         _concurrency.load(butil::memory_order_relaxed) < FLAGS_bthread_concurrency) {

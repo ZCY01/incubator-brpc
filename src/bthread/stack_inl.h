@@ -49,12 +49,14 @@ struct LargeStackClass {
 template <typename StackClass> struct StackFactory {
     struct Wrapper : public ContextualStack {
         explicit Wrapper(void (*entry)(intptr_t)) {
+            // 申请堆栈
             if (allocate_stack_storage(&storage, *StackClass::stack_size_flag,
                                        FLAGS_guard_page_size) != 0) {
                 storage.zeroize();
                 context = NULL;
                 return;
             }
+            // 构造堆栈结构，并返回 rsp
             context = bthread_make_fcontext(storage.bottom, storage.stacksize, entry);
             stacktype = (StackType)StackClass::stacktype;
         }
@@ -76,6 +78,7 @@ template <typename StackClass> struct StackFactory {
     }
 };
 
+// main stack 不需要拥有实际的 堆栈
 template <> struct StackFactory<MainStackClass> {
     static ContextualStack* get_stack(void (*)(intptr_t)) {
         ContextualStack* s = new (std::nothrow) ContextualStack;

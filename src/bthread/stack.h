@@ -31,10 +31,13 @@
 namespace bthread {
 
 struct StackStorage {
-     int stacksize;
-     int guardsize;
+    // 堆栈大小
+    int stacksize;
+    //对齐大小
+    int guardsize;
     // Assume stack grows upwards.
     // http://www.boost.org/doc/libs/1_55_0/libs/context/doc/html/context/stack.html
+    // bittm = malloc + stacksize
     void* bottom;
     unsigned valgrind_stack_id;
 
@@ -62,8 +65,11 @@ enum StackType {
 };
 
 struct ContextualStack {
+    // context 指向 rsp
+    // 切换堆栈的时候，实际上只需要修改 rsp 即可
     bthread_fcontext_t context;
     StackType stacktype;
+    // 堆栈的实际拥有者
     StackStorage storage;
 };
 
